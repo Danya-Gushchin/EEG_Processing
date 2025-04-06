@@ -18,57 +18,37 @@ def load_eeg_data(file_path, sfreq=256):
         Частота дискретизации (по умолчанию 256 Гц)
     """
     try:
-        # Загрузка CSV с обработкой разных форматов чисел
-        df = pd.read_csv(file_path, 
-                        sep=None, 
-                        engine='python',
-                        decimal='.',  # Указываем десятичный разделитель
-                        thousands=None,
-                        encoding='utf-8',
-                        dtype=str,  # Сначала читаем как строки
-                        on_bad_lines='warn')
-        
-        # Преобразуем в числа, заменяя ошибки на NaN
+        df = pd.read_csv(file_path, sep=None, engine='python', decimal='.', dtype=str, on_bad_lines='skip')
+
         for col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        # Удаляем столбцы, которые не смогли преобразовать
+
         df = df.dropna(axis=1, how='all')
-        
+        df = df.dropna(axis=0, how='all')
+
         if df.empty:
             raise ValueError("CSV файл не содержит числовых данных")
-            
-        # Проверяем заголовки
-        if isinstance(df.columns[0], str) and df.columns[0].replace('.','',1).isdigit():
-            # Если заголовки - это числа, значит настоящих заголовков нет
-            ch_names = [f'EEG_{i+1}' for i in range(df.shape[1])]
-            data = df.values.T
-        else:
-            # Используем или создаем заголовки
-            ch_names = [str(col) for col in df.columns]
-            data = df.values.T
-        
-        # Проверяем данные на NaN
+
+        data = df.values.T
+
+        # Удаление строк, полностью состоящих из нулей
+        non_zero_mask = ~(np.all(data == 0, axis=1))
+        data = data[non_zero_mask]
+        ch_names = [f"EEG_{i+1}" for i in range(data.shape[0])]
+
         if np.isnan(data).any():
-            print("Предупреждение: данные содержат пропущенные значения (NaN)")
-            data = np.nan_to_num(data)  # Заменяем NaN на 0
-        
-        # Создаем объект RawArray
+            print("Предупреждение: данные содержат NaN. Заменяем на 0.")
+            data = np.nan_to_num(data)
+
         info = mne.create_info(ch_names=ch_names, sfreq=sfreq, ch_types='eeg')
         raw = mne.io.RawArray(data, info)
-        
-        print(f"Успешно загружено {len(ch_names)} каналов:")
-        print(ch_names)
-        print(f"Форма данных: {data.shape}")
-        
+
+        print(f"Загружено {data.shape[0]} каналов, {data.shape[1]} отсчётов на канал.")
+        print(raw)
         return raw
+
     except Exception as e:
-        print(f"Ошибка загрузки файла: {str(e)}")
-        print("\nРекомендации:")
-        print("1. Проверьте, что файл содержит только числовые данные")
-        print("2. Убедитесь, что десятичный разделитель - точка (.)")
-        print("3. Проверьте кодировку файла (должна быть UTF-8)")
-        print("4. Удалите все нечисловые символы и заголовки, если они мешают")
+        print(f"Ошибка при загрузке: {e}")
         raise
     
 # 2. Предобработка данных
@@ -89,18 +69,19 @@ def preprocess_eeg(raw, l_freq=1, h_freq=40, notch_freq=50):
     raw_filtered.notch_filter(freqs=notch_freq)
     
     # Автоматическое удаление артефактов (альтернатива - ручная разметка)
-    ica = mne.preprocessing.ICA(n_components=64, random_state=97)
+    ica = mne.preprocessing.ICA(n_components=32, random_state=97)
     ica.fit(raw_filtered)
-    ica.apply(raw_filtered)
+    ica.apply(raw_filtered) 
     
     return raw_filtered
 
 # 3. Визуализация сырых и обработанных данных
-def plot_raw_vs_filtered(raw, raw_filtered, channel=0, duration=10):
+def plot_raw_vs_filtered(raw, raw_filtered, channel=0, fs = 256, duration=10):
     """
     Сравнение сырых и обработанных данных
     """
     # Выбираем канал и временной интервал
+    duration = len(raw)/fs
     start, stop = raw.time_as_index([0, duration])
     data, times = raw[channel, start:stop]
     data_filt, _ = raw_filtered[channel, start:stop]
@@ -202,7 +183,7 @@ def plot_bands(band_power_rel):
 # Основной скрипт обработки
 if __name__ == "__main__":
     # Загрузка данных (замените путь на ваш файл)
-    file_path = 'data/raw_EEG_Gushchin.csv'  # Пример для .edf файла
+    file_path = 'data/raw_Gushchin_EEG.csv'  # Пример для .edf файла
     raw = load_eeg_data(file_path)
     
     # Предобработка
