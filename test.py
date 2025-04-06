@@ -210,3 +210,4 @@ if __name__ == "__main__":
     }
     # Визуализация ритмов
     plot_bands(band_power_rel)
+    print("jopa")
