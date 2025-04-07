@@ -1,213 +1,228 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import mne
-from scipy import signal
-from scipy.fft import fft, fftfreq
 import pandas as pd
+import mne
+from scipy.signal import butter, filtfilt
 
-# 1. Загрузка данных
-def load_eeg_data(file_path, sfreq=256):
-    """
-    Улучшенная загрузка ЭЭГ данных из CSV с обработкой ошибок формата
-    
-    Parameters:
-    -----------
-    file_path : str
-        Путь к CSV файлу с данными
-    sfreq : float
-        Частота дискретизации (по умолчанию 256 Гц)
-    """
-    try:
-        df = pd.read_csv(file_path, sep=None, engine='python', decimal='.', dtype=str, on_bad_lines='skip')
+class EEGPreprocessing:
+    def __init__(self, sfreq=256):
+        """
+        Инициализация класса предобработки ЭЭГ
+        
+        Parameters:
+        -----------
+        sfreq : float
+            Частота дискретизации (по умолчанию 256 Гц)
+        """
+        self.sfreq = sfreq
+        self.notch_filter = None
+        self.bandpass_filter = None
+        
+    def load_eeg_data(self, file_path):
+        """
+        Улучшенная загрузка ЭЭГ данных из CSV с обработкой ошибок формата
+        
+        Parameters:
+        -----------
+        file_path : str
+            Путь к CSV файлу с данными
+        """
+        try:
+            # Загрузка данных с обработкой различных форматов
+            df = pd.read_csv(file_path, sep=None, engine='python', decimal='.', dtype=str, on_bad_lines='skip')
 
-        for col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+            # Преобразование в числовой формат с обработкой ошибок
+            for col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        df = df.dropna(axis=1, how='all')
-        df = df.dropna(axis=0, how='all')
+            # Удаление полностью пустых столбцов и строк
+            df = df.dropna(axis=1, how='all')
+            df = df.dropna(axis=0, how='all')
 
-        if df.empty:
-            raise ValueError("CSV файл не содержит числовых данных")
+            if df.empty:
+                raise ValueError("CSV файл не содержит числовых данных")
 
-        data = df.values.T
+            data = df.values.T
 
-        # Удаление строк, полностью состоящих из нулей
-        non_zero_mask = ~(np.all(data == 0, axis=1))
-        data = data[non_zero_mask]
-        ch_names = [f"EEG_{i+1}" for i in range(data.shape[0])]
+            # Удаление каналов, полностью состоящих из нулей
+            non_zero_mask = ~(np.all(data == 0, axis=1))
+            data = data[non_zero_mask]
+            ch_names = [f"EEG_{i+1}" for i in range(data.shape[0])]
 
-        if np.isnan(data).any():
-            print("Предупреждение: данные содержат NaN. Заменяем на 0.")
-            data = np.nan_to_num(data)
+            # Замена NaN на 0 с предупреждением
+            if np.isnan(data).any():
+                print("Предупреждение: данные содержат NaN. Заменяем на 0.")
+                data = np.nan_to_num(data)
 
-        info = mne.create_info(ch_names=ch_names, sfreq=sfreq, ch_types='eeg')
-        raw = mne.io.RawArray(data, info)
+            # Создание MNE Raw объекта
+            info = mne.create_info(ch_names=ch_names, sfreq=self.sfreq, ch_types='eeg')
+            raw = mne.io.RawArray(data, info)
 
-        print(f"Загружено {data.shape[0]} каналов, {data.shape[1]} отсчётов на канал.")
-        print(raw)
-        return raw
+            print(f"Успешно загружено {data.shape[0]} каналов, {data.shape[1]} отсчётов.")
+            return raw
 
-    except Exception as e:
-        print(f"Ошибка при загрузке: {e}")
-        raise
+        except Exception as e:
+            print(f"Ошибка при загрузке данных: {e}")
+            raise
     
-# 2. Предобработка данных
-def preprocess_eeg(raw, l_freq=1, h_freq=40, notch_freq=50):
-    """
-    Основные этапы предобработки ЭЭГ:
-    - Фильтрация
-    - Удаление артефактов
-    - Режекторный фильтр
-    """
-    # Копируем данные, чтобы не изменять оригинал
-    raw_filtered = raw.copy()
+    def design_filters(self, notch_freq=50.0, bandpass_range=(1, 40)):
+        """
+        Создание фильтров для предобработки
+        
+        Parameters:
+        -----------
+        notch_freq : float
+            Частота для режекторного фильтра (по умолчанию 50 Гц)
+        bandpass_range : tuple
+            Границы полосового фильтра (low, high) в Гц
+        """
+        # Режекторный фильтр (notch) для 50 Гц
+        nyq = 0.5 * self.sfreq
+        freq = notch_freq / nyq
+        b, a = butter(2, [freq-0.05, freq+0.05], btype='bandstop')
+        self.notch_filter = (b, a)
+        
+        # Полосовой фильтр
+        low = bandpass_range[0] / nyq
+        high = bandpass_range[1] / nyq
+        b, a = butter(4, [low, high], btype='band')
+        self.bandpass_filter = (b, a)
     
-    # Применяем bandpass фильтр (1-40 Гц по умолчанию)
-    raw_filtered.filter(l_freq=l_freq, h_freq=h_freq, method='iir')
+    def apply_filters(self, signal):
+        """
+        Применение фильтров к сигналу
+        
+        Parameters:
+        -----------
+        signal : ndarray
+            Входной сигнал (1D array)
+        
+        Returns:
+        --------
+        filtered_signal : ndarray
+            Отфильтрованный сигнал
+        """
+        if self.notch_filter is None or self.bandpass_filter is None:
+            raise ValueError("Фильтры не инициализированы. Сначала вызовите design_filters()")
+            
+        # Применяем режекторный фильтр
+        signal_filtered = filtfilt(*self.notch_filter, signal)
+        
+        # Применяем полосовой фильтр
+        signal_filtered = filtfilt(*self.bandpass_filter, signal_filtered)
+        
+        return signal_filtered
     
-    # Применяем notch фильтр для удаления сетевых помех (50 Гц в России/Европе)
-    raw_filtered.notch_filter(freqs=notch_freq)
+    def preprocess_pipeline(self, raw, notch_freq=50.0, bandpass_range=(1, 40), ica_n_components=15):
+        """
+        Полный пайплайн предобработки ЭЭГ данных
+        
+        Parameters:
+        -----------
+        raw : mne.io.Raw
+            Сырые данные ЭЭГ
+        notch_freq : float
+            Частота для режекторного фильтра
+        bandpass_range : tuple
+            Границы полосового фильтра
+        ica_n_components : int
+            Количество компонент для ICA
+        
+        Returns:
+        --------
+        raw_processed : mne.io.Raw
+            Обработанные данные
+        """
+        # 1. Копируем данные, чтобы не изменять оригинал
+        raw_processed = raw.copy()
+        
+        # 2. Создаем фильтры
+        self.design_filters(notch_freq=notch_freq, bandpass_range=bandpass_range)
+        
+        # 3. Применяем фильтры к каждому каналу
+        for i in range(len(raw_processed.ch_names)):
+            raw_processed._data[i] = self.apply_filters(raw_processed._data[i])
+        
+        # 4. Применяем ICA для удаления артефактов (если требуется)
+        if ica_n_components > 0:
+            try:
+                ica = mne.preprocessing.ICA(n_components=ica_n_components, random_state=97)
+                ica.fit(raw_processed)
+                
+                # Автоматическое обнаружение артефактов
+                ica.exclude = []
+                
+                # Обнаружение глазных артефактов
+                eog_indices, eog_scores = ica.find_bads_eog(raw_processed)
+                if eog_indices:
+                    ica.exclude.extend(eog_indices)
+                    print(f"Обнаружены и исключены {len(eog_indices)} EOG компонент")
+                
+                # Обнаружение мышечных артефактов
+                muscle_indices = ica.find_bads_muscle(raw_processed)
+                if muscle_indices:
+                    ica.exclude.extend(muscle_indices)
+                    print(f"Обнаружены и исключены {len(muscle_indices)} мышечных компонент")
+                
+                ica.apply(raw_processed)
+            except Exception as e:
+                print(f"Ошибка при применении ICA: {e}")
+                print("Продолжаем без ICA...")
+        
+        return raw_processed
     
-    # Автоматическое удаление артефактов (альтернатива - ручная разметка)
-    ica = mne.preprocessing.ICA(n_components=32, random_state=97)
-    ica.fit(raw_filtered)
-    ica.apply(raw_filtered) 
-    
-    return raw_filtered
+    def compare_raw_vs_processed(self, raw, processed, channel=0, fs=256):
+        """
+        Визуальное сравнение сырых и обработанных данных
+        
+        Parameters:
+        -----------
+        raw : mne.io.Raw
+            Сырые данные
+        processed : mne.io.Raw
+            Обработанные данные
+        channel_idx : int
+            Индекс канала для визуализации
+        duration : float
+            Длительность отрезка для отображения (в секундах)
+        """
+        # Получаем данные
+        duration = raw.n_times/fs
+        start, stop = raw.time_as_index([0, duration])
+        raw_data, times = raw[channel, start:stop]
+        proc_data, _ = processed[channel, start:stop]
+        
+        # Создаем график
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+        
+        ax1.plot(times, raw_data.T)
+        ax1.set_title(f'Сырые данные (канал: {raw.ch_names[channel]})')
+        ax1.set_ylabel('Амплитуда (μV)')
+        ax1.grid(True)
+        
+        ax2.plot(times, proc_data.T)
+        ax2.set_title('После предобработки')
+        ax2.set_ylabel('Амплитуда (μV)')
+        ax2.set_xlabel('Время (с)')
+        ax2.grid(True)
+        
+        plt.tight_layout()
+        plt.show()
 
-# 3. Визуализация сырых и обработанных данных
-def plot_raw_vs_filtered(raw, raw_filtered, channel=0, fs = 256, duration=10):
-    """
-    Сравнение сырых и обработанных данных
-    """
-    # Выбираем канал и временной интервал
-    duration = len(raw)/fs
-    start, stop = raw.time_as_index([0, duration])
-    data, times = raw[channel, start:stop]
-    data_filt, _ = raw_filtered[channel, start:stop]
-    
-    # Создаем график
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
-    ax1.plot(times, data.T)
-    ax1.set_title('Raw data')
-    ax1.set_ylabel('Amplitude (μV)')
-    
-    ax2.plot(times, data_filt.T)
-    ax2.set_title('Filtered data')
-    ax2.set_ylabel('Amplitude (μV)')
-    ax2.set_xlabel('Time (s)')
-    
-    plt.tight_layout()
-    plt.show()
-
-# 4. Спектральный анализ
-def compute_spectrum(raw_filtered, channel=0, nperseg=256):
-    """
-    Вычисление спектра мощности с использованием метода Уэлча
-    """
-    # Получаем данные для выбранного канала
-    data, times = raw_filtered[channel]
-    
-    # Вычисляем спектр мощности
-    sfreq = raw_filtered.info['sfreq']
-    freqs, psd = signal.welch(data, fs=sfreq, nperseg=nperseg)
-    
-    return freqs, psd
-
-# 5. Визуализация спектра
-def plot_spectrum(freqs, psd, l_freq=1, h_freq=40):
-    """
-    Визуализация спектра мощности
-    """
-    plt.figure(figsize=(10, 5))
-    plt.plot(freqs, 10 * np.log10(psd.T), linewidth=1)  # В dB
-    plt.xlim([l_freq, h_freq])
-    plt.xlabel('Frequency (Hz)')
-    plt.ylabel('Power Spectral Density (dB/Hz)')
-    plt.title('EEG Power Spectrum')
-    plt.grid(True)
-    plt.show()
-
-# 6. Анализ ритмов ЭЭГ
-def analyze_bands(freqs, psd):
-    """
-    Анализ мощности в основных ритмах ЭЭГ
-    """
-    # Определяем границы ритмов
-    bands = {
-        'delta': (1, 4),
-        'theta': (4, 8),
-        'alpha': (8, 13),
-        'beta': (13, 30),
-        'gamma': (30, 40)
-    }
-    
-    band_power = {}
-    for band, (low, high) in bands.items():
-        # Находим индексы частот в диапазоне
-        idx = np.logical_and(freqs >= low, freqs <= high)
-        # Интегрируем мощность в диапазоне
-        band_power[band] = np.trapz(psd[:, idx], freqs[idx])
-    
-    # Нормализуем мощности относительно общей мощности
-    total_power = sum(band_power.values())
-    band_power_rel = {band: power/total_power for band, power in band_power.items()}
-    
-    return band_power, band_power_rel
-
-# 7. Визуализация ритмов
-def plot_bands(band_power_rel):
-    """
-    Визуализация относительной мощности ритмов
-    """
-    bands = list(band_power_rel.keys())
-    values = list(band_power_rel.values())  # Преобразуем в обычный список
-    
-    print(values)  # Отладочный вывод
-    print(type(values))  # Отладочный вывод
-    
-    plt.figure(figsize=(8, 5))
-    bars = plt.bar(bands, values)  # Передаем плоский список
-    plt.title('Relative Power of EEG Bands')
-    plt.ylabel('Relative Power')
-    
-    # Добавляем значения на столбцы
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., height,
-                 f'{height:.2f}',
-                 ha='center', va='bottom')
-    
-    plt.show()
-
-# Основной скрипт обработки
 if __name__ == "__main__":
-    # Загрузка данных (замените путь на ваш файл)
-    file_path = 'data/raw_Gushchin_EEG.csv'  # Пример для .edf файла
-    raw = load_eeg_data(file_path)
-    
-    # Предобработка
-    raw_filtered = preprocess_eeg(raw)
-    
-    # Визуализация сырых и обработанных данных
-    plot_raw_vs_filtered(raw, raw_filtered)
-    
-    # Спектральный анализ
-    freqs, psd = compute_spectrum(raw_filtered)
-    plot_spectrum(freqs, psd)
-    
-    # Анализ ритмов
-    band_power, band_power_rel = analyze_bands(freqs, psd)
-    print("Absolute band power:", band_power)
-    print("Relative band power:", band_power_rel)
-    
-    band_power_rel = {
-    "Delta": 0.1,
-    "Theta": 0.2,
-    "Alpha": 0.3,
-    "Beta": 0.25,
-    "Gamma": 0.15
-    }
-    # Визуализация ритмов
-    plot_bands(band_power_rel)
-    print("jopa")
+    # Инициализация
+    preprocessor = EEGPreprocessing(sfreq=256)
+
+    # Загрузка данных
+    raw = preprocessor.load_eeg_data("data/raw_Gushchin_EEG.csv")
+
+    # Полная предобработка
+    processed = preprocessor.preprocess_pipeline(
+        raw,
+        notch_freq=50.0,
+        bandpass_range=(1, 40),
+        ica_n_components=64
+    )
+
+    # Визуальное сравнение
+    preprocessor.compare_raw_vs_processed(raw, processed, channel=0)
